@@ -1,0 +1,532 @@
+#include <iostream>
+#include <fstream>
+#include <cstring>
+#include <vector>
+#include <cctype>
+
+static const int T = 16;
+
+struct Key {
+    char data[257];
+    int len;
+
+    Key() : len(0) { data[0] = '\0'; }
+
+    Key(const char* s) {
+        len = 0;
+        while (s[len] && len < 256) {
+            data[len] = (char)tolower((unsigned char)s[len]);
+            len++;
+        }
+        data[len] = '\0';
+    }
+
+    bool operator<(const Key& o)  const { return strcmp(data, o.data) < 0;  }
+    bool operator>(const Key& o)  const { return strcmp(data, o.data) > 0;  }
+    bool operator==(const Key& o) const { return strcmp(data, o.data) == 0; }
+    bool operator!=(const Key& o) const { return strcmp(data, o.data) != 0; }
+    bool operator<=(const Key& o) const { return strcmp(data, o.data) <= 0; }
+    bool operator>=(const Key& o) const { return strcmp(data, o.data) >= 0; }
+};
+
+struct BTreeNode {
+    bool isLeaf;
+    int keyCount;
+    std::vector<Key> keys;
+    std::vector<unsigned long long> values;
+    std::vector<BTreeNode*> children;
+
+    BTreeNode(bool leaf) : isLeaf(leaf), keyCount(0) {}
+    
+    ~BTreeNode() {
+        if (!isLeaf) {
+            for (BTreeNode* child : children) {
+                delete child;
+            }
+        }
+    }
+};
+
+bool BTreeSearch(BTreeNode* node, const Key& key, unsigned long long& value) {
+    int i = 0;
+    while (i < node->keyCount && node->keys[i] < key) {
+        i++;
+    }
+    if (i < node->keyCount && node->keys[i] == key) {
+        value = node->values[i];
+        return true;
+    }
+    if (node->isLeaf) {
+        return false;
+    }
+    return BTreeSearch(node->children[i], key, value);
+}
+
+
+void splitChild(BTreeNode* parent, int i, BTreeNode* child) {
+    BTreeNode* z = new BTreeNode(child->isLeaf);
+    z->keyCount = T - 1;
+
+    for (int j = 0; j < T - 1; j++) {
+        z->keys.push_back(child->keys[j + T]);
+        z->values.push_back(child->values[j + T]);
+    }
+
+    if (!child->isLeaf) {
+        for (int j = 0; j < T; j++) {
+            z->children.push_back(child->children[j + T]);
+        }
+        child->children.resize(T);
+    }
+
+    Key medianKey = child->keys[T - 1];
+    unsigned long long medianVal = child->values[T - 1];
+
+    child->keys.resize(T - 1);
+    child->values.resize(T - 1);
+    child->keyCount = T - 1;
+
+    parent->children.insert(parent->children.begin() + i + 1, z);
+    parent->keys.insert(parent->keys.begin() + i, medianKey);
+    parent->values.insert(parent->values.begin() + i, medianVal);
+    parent->keyCount++;
+}
+
+
+void InsertNonFull(BTreeNode* node, const Key& key, unsigned long long value) {
+    int i = node->keyCount - 1;
+
+    if (node->isLeaf) {
+        node->keys.push_back(Key());
+        node->values.push_back(0);
+        while (i >= 0 && node->keys[i] > key) {
+            node->keys[i + 1] = node->keys[i];
+            node->values[i + 1] = node->values[i];
+            i--;
+        }
+        node->keys[i + 1] = key;
+        node->values[i + 1] = value;
+        node->keyCount++;
+    } else {
+        while (i >= 0 && node->keys[i] > key) {
+            i--;
+        }
+        i++;
+        if (node->children[i]->keyCount == 2 * T - 1) {
+            splitChild(node, i, node->children[i]);
+            if (node->keys[i] < key) {
+                i++;
+            }
+        }
+        InsertNonFull(node->children[i], key, value);
+    }
+}
+
+
+void getPredecessor(BTreeNode* node, int idx, Key& predKey, unsigned long long& predVal) {
+    BTreeNode* cur = node->children[idx];
+    while (!cur->isLeaf) {
+        cur = cur->children[cur->keyCount];
+    }
+    predKey = cur->keys[cur->keyCount - 1];
+    predVal = cur->values[cur->keyCount - 1];
+}
+
+void getSuccessor(BTreeNode* node, int idx, Key& succKey, unsigned long long& succVal) {
+    BTreeNode* cur = node->children[idx + 1];
+    while (!cur->isLeaf) {
+        cur = cur->children[0];
+    }
+    succKey = cur->keys[0];
+    succVal = cur->values[0];
+}
+
+void borrowFromPrev(BTreeNode* node, int idx) {
+    BTreeNode* child = node->children[idx];
+    BTreeNode* sibling = node->children[idx - 1];
+
+    child->keys.insert(child->keys.begin(), node->keys[idx - 1]);
+    child->values.insert(child->values.begin(), node->values[idx - 1]);
+
+    if (!child->isLeaf) {
+        child->children.insert(child->children.begin(),
+                               sibling->children[sibling->keyCount]);
+        sibling->children.pop_back();
+    }
+
+    node->keys[idx - 1] = sibling->keys[sibling->keyCount - 1];
+    node->values[idx - 1] = sibling->values[sibling->keyCount - 1];
+
+    sibling->keys.pop_back();
+    sibling->values.pop_back();
+
+    child->keyCount++;
+    sibling->keyCount--;
+}
+
+void borrowFromNext(BTreeNode* node, int idx) {
+    BTreeNode* child = node->children[idx];
+    BTreeNode* sibling = node->children[idx + 1];
+
+    child->keys.push_back(node->keys[idx]);
+    child->values.push_back(node->values[idx]);
+
+    if (!child->isLeaf) {
+        child->children.push_back(sibling->children[0]);
+        sibling->children.erase(sibling->children.begin());
+    }
+
+    node->keys[idx] = sibling->keys[0];
+    node->values[idx] = sibling->values[0];
+
+    sibling->keys.erase(sibling->keys.begin());
+    sibling->values.erase(sibling->values.begin());
+
+    child->keyCount++;
+    sibling->keyCount--;
+}
+
+void merge(BTreeNode* node, int idx) {
+    BTreeNode* child = node->children[idx];
+    BTreeNode* sibling = node->children[idx + 1];
+
+    child->keys.push_back(node->keys[idx]);
+    child->values.push_back(node->values[idx]);
+
+    for (int i = 0; i < sibling->keyCount; i++) {
+        child->keys.push_back(sibling->keys[i]);
+        child->values.push_back(sibling->values[i]);
+    }
+
+    if (!child->isLeaf) {
+        for (int i = 0; i <= sibling->keyCount; i++) {
+            child->children.push_back(sibling->children[i]);
+        }
+    }
+
+    child->keyCount = 2 * T - 1;
+
+    node->keys.erase(node->keys.begin() + idx);
+    node->values.erase(node->values.begin() + idx);
+    node->children.erase(node->children.begin() + idx + 1);
+    node->keyCount--;
+
+    sibling->children.clear();
+    sibling->keys.clear();
+    sibling->values.clear();
+    sibling->keyCount = 0;
+    delete sibling;
+}
+
+void fill(BTreeNode* node, int idx) {
+    if (idx > 0 && node->children[idx - 1]->keyCount >= T) {
+        borrowFromPrev(node, idx);
+    } else if (idx < node->keyCount && node->children[idx + 1]->keyCount >= T) {
+        borrowFromNext(node, idx);
+    } else {
+        if (idx < node->keyCount) {
+            merge(node, idx);
+        } else {
+            merge(node, idx - 1);
+        }
+    }
+}
+
+void BTreeRemoveInternal(BTreeNode* node, const Key& key);
+
+void removeFromNonLeaf(BTreeNode* node, int idx) {
+    Key k = node->keys[idx];
+
+    if (node->children[idx]->keyCount >= T) {
+        Key predKey;
+        unsigned long long predVal;
+        getPredecessor(node, idx, predKey, predVal);
+        node->keys[idx] = predKey;
+        node->values[idx] = predVal;
+        BTreeRemoveInternal(node->children[idx], predKey);
+    } else if (node->children[idx + 1]->keyCount >= T) {
+        Key succKey;
+        unsigned long long succVal;
+        getSuccessor(node, idx, succKey, succVal);
+        node->keys[idx] = succKey;
+        node->values[idx] = succVal;
+        BTreeRemoveInternal(node->children[idx + 1], succKey);
+    } else {
+        merge(node, idx);
+        BTreeRemoveInternal(node->children[idx], k);
+    }
+}
+
+void BTreeRemoveInternal(BTreeNode* node, const Key& key) {
+    int idx = 0;
+    while (idx < node->keyCount && node->keys[idx] < key) {
+        idx++;
+    }
+
+    if (idx < node->keyCount && node->keys[idx] == key) {
+        if (node->isLeaf) {
+            node->keys.erase(node->keys.begin() + idx);
+            node->values.erase(node->values.begin() + idx);
+            node->keyCount--;
+        } else {
+            removeFromNonLeaf(node, idx);
+        }
+        return;
+    }
+
+    if (node->isLeaf) {
+        return; 
+    }
+
+    bool lastChild = (idx == node->keyCount);
+
+    if (node->children[idx]->keyCount < T) {
+        fill(node, idx);
+    }
+
+    if (lastChild && idx > node->keyCount) {
+        BTreeRemoveInternal(node->children[idx - 1], key);
+    } else {
+        BTreeRemoveInternal(node->children[idx], key);
+    }
+}
+
+
+void FreeNode(BTreeNode* node) {
+    if (!node) return;
+    if (!node->isLeaf) {
+        for (int i = 0; i <= node->keyCount; i++) {
+            FreeNode(node->children[i]);
+        }
+    }
+    node->children.clear();
+    delete node;
+}
+
+
+bool SaveNode(BTreeNode* node, std::ofstream& out) {
+    char leaf = node->isLeaf ? 1 : 0;
+    out.write(&leaf, 1);
+    int kc = node->keyCount;
+    out.write((char*)&kc, sizeof(int));
+
+    for (int i = 0; i < kc; i++) {
+        int len = node->keys[i].len;
+        out.write((char*)&len, sizeof(int));
+        out.write(node->keys[i].data, len);
+        out.write((char*)&node->values[i], sizeof(unsigned long long));
+    }
+
+    if (!node->isLeaf) {
+        for (int i = 0; i <= kc; i++) {
+            if (!SaveNode(node->children[i], out)) {
+                return false;
+            }
+        }
+    }
+
+    return out.good();
+}
+
+bool SaveTree(BTreeNode* root, const char* path) {
+    std::ofstream out(path, std::ios::binary);
+    const char sig[4] = {'B', 'T', 'D', '1'};
+    out.write(sig, 4);
+    int t = T;
+    out.write((char*)&t, sizeof(int));
+    if (!SaveNode(root, out)) {
+        return false;
+    }
+    return out.good();
+}
+
+BTreeNode* LoadNode(std::ifstream& in, bool& ok) {
+    char leaf;
+    in.read(&leaf, 1);
+    if (!in.good()) { ok = false; return nullptr; }
+
+    BTreeNode* node = new BTreeNode(leaf != 0);
+    int kc;
+    in.read((char*)&kc, sizeof(int));
+    if (!in.good() || kc < 0 || kc > 2 * T - 1) { 
+        ok = false; 
+        delete node; 
+        return nullptr; 
+    }
+
+    node->keyCount = kc;
+    node->keys.resize(kc);
+    node->values.resize(kc);
+
+    for (int i = 0; i < kc; i++) {
+        int len;
+        in.read((char*)&len, sizeof(int));
+        if (!in.good() || len < 0 || len > 256) { 
+            ok = false; 
+            delete node;  
+            return nullptr; 
+        }
+        node->keys[i].len = len;
+        in.read(node->keys[i].data, len);
+        node->keys[i].data[len] = '\0';
+        if (!in.good()) { 
+            ok = false; 
+            delete node; 
+            return nullptr; 
+        }
+        in.read((char*)&node->values[i], sizeof(unsigned long long));
+        if (!in.good()) { 
+            ok = false; 
+            delete node;  
+            return nullptr; 
+        }
+    }
+
+    if (!node->isLeaf) {
+        for (int i = 0; i <= kc; i++) {
+            BTreeNode* child = LoadNode(in, ok);
+            if (!ok) {
+                for (BTreeNode* c : node->children) {
+                    delete c;
+                }
+                delete node;
+                return nullptr;
+            }
+            node->children.push_back(child);
+        }
+    }
+
+    return node;
+}
+
+BTreeNode* LoadTree(const char* path, bool& ok, bool& formatError) {
+    ok = true;
+    formatError = false;
+
+    std::ifstream in(path, std::ios::binary);
+    if (!in.good()) {
+        ok = true;
+        return new BTreeNode(true);
+    }
+
+    char sig[4];
+    in.read(sig, 4);
+    if (!in.good() || sig[0] != 'B' || sig[1] != 'T' || sig[2] != 'D' || sig[3] != '1') {
+        ok = false;
+        formatError = true;
+        return nullptr;
+    }
+
+    int t;
+    in.read((char*)&t, sizeof(int));
+    if (!in.good() || t != T) {
+        ok = false;
+        formatError = true;
+        return nullptr;
+    }
+
+    BTreeNode* root = LoadNode(in, ok);
+    if (!ok) {
+        formatError = true;
+        return nullptr;
+    }
+
+    return root;
+}
+
+
+int main() {
+    std::ios_base::sync_with_stdio(false);
+    std::cin.tie(nullptr);
+
+    BTreeNode* root = new BTreeNode(true);
+
+    char line[1024];
+    while (std::cin.getline(line, sizeof(line))) {
+        if (line[0] == '\0') continue;
+
+        if (line[0] == '+') {
+            char word[300];
+            unsigned long long val;
+            if (sscanf(line + 1, "%s %llu", word, &val) != 2) continue;
+
+            Key key(word);
+            unsigned long long existingVal;
+            if (BTreeSearch(root, key, existingVal)) {
+                std::cout << "Exist" << std::endl;
+            } else {
+                if (root->keyCount == 2 * T - 1) {
+                    BTreeNode* newRoot = new BTreeNode(false);
+                    newRoot->children.push_back(root);
+                    newRoot->keyCount = 0;
+                    splitChild(newRoot, 0, root);
+                    root = newRoot;
+                }
+                InsertNonFull(root, key, val);
+                std::cout << "OK" << std::endl;
+            }
+        } else if (line[0] == '-') {
+            char word[300];
+            if (sscanf(line + 1, "%s", word) != 1) continue;
+
+            Key key(word);
+            unsigned long long existingVal;
+            if (!BTreeSearch(root, key, existingVal)) {
+                std::cout << "NoSuchWord" << std::endl;
+            } else {
+                BTreeRemoveInternal(root, key);
+                if (root->keyCount == 0 && !root->isLeaf) {
+                    BTreeNode* oldRoot = root;
+                    root = root->children[0];
+                    oldRoot->children.clear();
+                    delete oldRoot;
+                }
+                std::cout << "OK" << std::endl;
+            }
+        } else if (line[0] == '!') {
+            char cmd[10];
+            char path[512];
+            if (sscanf(line + 1, "%s %s", cmd, path) != 2) continue;
+
+            if (strcmp(cmd, "Save") == 0) {
+                if (SaveTree(root, path)) {
+                    std::cout << "OK" << std::endl;
+                } else {
+                    std::cout << "ERROR: Failed to save to file" << std::endl;
+                }
+            } else if (strcmp(cmd, "Load") == 0) {
+                bool ok;
+                bool formatError;
+                BTreeNode* newRoot = LoadTree(path, ok, formatError);
+                if (ok && newRoot) {
+                    FreeNode(root);
+                    root = newRoot;
+                    std::cout << "OK" << std::endl;
+                } else {
+                if (newRoot) {
+                    FreeNode(newRoot); 
+                }
+                if (formatError) {
+                    std::cout << "ERROR: Invalid file format" << std::endl;
+                } else {
+                    std::cout << "ERROR: Failed to load from file" << std::endl;
+                }
+            }
+            }
+        } else {
+            char word[300];
+            if (sscanf(line, "%s", word) != 1) continue;
+
+            Key key(word);
+            unsigned long long val;
+            if (BTreeSearch(root, key, val)) {
+                std::cout << "OK: " << val << std::endl;
+            } else {
+                std::cout << "NoSuchWord" << std::endl;
+            }
+        }
+    }
+
+    FreeNode(root);
+    return 0;
+}
