@@ -1,0 +1,325 @@
+#include <iostream>
+#include <vector>
+#include <string>
+#include <algorithm>
+#include <utility>
+
+struct Node {
+    std::vector<int> ChildNodes;
+    std::vector<std::pair<int, int>> ChildSuff;
+    int link;
+    int suffix_start;
+    bool is_leaf;
+    int mask;
+    int sample_start;
+    Node() : link(-1), suffix_start(-1), is_leaf(false), mask(0), sample_start(-1) {}
+};
+
+std::vector<Node> SuffTree;
+std::string global;
+std::vector<int> node_depth;
+
+int current_pos = -1;
+int pos1 = -1;
+int pos2 = -1;
+
+int active_node = 0;
+int active_length = 0;
+int active_rebr = 0;
+int need_suff = 0;
+int need_link = -1;
+
+int getEnd(int end) {
+    if (end == -1) return current_pos;
+    return end;
+}
+
+int FindTransition(int idx, char c) {
+    const Node& n = SuffTree[idx];
+
+    for (size_t i = 0; i < n.ChildSuff.size(); i++) {
+        int start = n.ChildSuff[i].first;
+
+        if (global[start] == c) {
+            return static_cast<int>(i);
+        }
+    }
+
+    return -1;
+}
+
+int CreateNode() {
+    SuffTree.push_back(Node());
+    return static_cast<int>(SuffTree.size()) - 1;
+}
+
+void addrebr(int nodepar, int nodech, int start, int end) {
+    SuffTree[nodepar].ChildNodes.push_back(nodech);
+    SuffTree[nodepar].ChildSuff.push_back({start, end});
+}
+
+int splitrebr(int node, int rebidx, int pos) {
+    int child = SuffTree[node].ChildNodes[rebidx];
+    int start = SuffTree[node].ChildSuff[rebidx].first;
+    int end = SuffTree[node].ChildSuff[rebidx].second;
+
+    int midnode = CreateNode();
+
+    SuffTree[node].ChildNodes[rebidx] = midnode;
+    SuffTree[node].ChildSuff[rebidx] = {start, pos - 1};
+
+    addrebr(midnode, child, pos, end);
+
+    return midnode;
+}
+
+void CalculateDepths(int idx, int curdepth) {
+    node_depth[idx] = curdepth;
+
+    const Node& n = SuffTree[idx];
+
+    for (size_t i = 0; i < n.ChildSuff.size(); i++) {
+        int child = n.ChildNodes[i];
+        int end = getEnd(n.ChildSuff[i].second);
+        int reblen = end - n.ChildSuff[i].first + 1;
+
+        CalculateDepths(child, curdepth + reblen);
+    }
+}
+
+void resetActive() {
+    active_node = 0;
+    active_length = 0;
+    active_rebr = 0;
+    need_suff = 0;
+    need_link = -1;
+    current_pos = -1;
+}
+
+void Ukkonen3(int pos) {
+    char c = global[pos];
+
+    need_suff++;
+    need_link = -1;
+    current_pos = pos;
+
+    while (need_suff != 0) {
+        if (active_length == 0) {
+            active_rebr = pos;
+        }
+
+        int rebrind = FindTransition(active_node, global[active_rebr]);
+
+        if (rebrind == -1) {
+            int leaf = CreateNode();
+
+            SuffTree[leaf].is_leaf = true;
+            SuffTree[leaf].suffix_start = pos - need_suff + 1;
+
+            addrebr(active_node, leaf, pos, -1);
+
+            if (need_link != -1) {
+                SuffTree[need_link].link = active_node;
+                need_link = -1;
+            }
+        } else {
+            int next_node = SuffTree[active_node].ChildNodes[rebrind];
+            int rebr_start = SuffTree[active_node].ChildSuff[rebrind].first;
+            int rebr_end = SuffTree[active_node].ChildSuff[rebrind].second;
+            int rebr_len = getEnd(rebr_end) - rebr_start + 1;
+
+            if (active_length >= rebr_len) {
+                active_length -= rebr_len;
+                active_node = next_node;
+                active_rebr += rebr_len;
+                continue;
+            }
+
+            char next_char = global[rebr_start + active_length];
+
+            if (next_char == c) {
+                if (need_link != -1) {
+                    SuffTree[need_link].link = active_node;
+                    need_link = -1;
+                }
+
+                active_length++;
+                break;
+            }
+
+            int split = splitrebr(active_node, rebrind, rebr_start + active_length);
+
+            int leaf = CreateNode();
+
+            SuffTree[leaf].is_leaf = true;
+            SuffTree[leaf].suffix_start = pos - need_suff + 1;
+
+            addrebr(split, leaf, pos, -1);
+
+            if (need_link != -1) {
+                SuffTree[need_link].link = split;
+            }
+
+            need_link = split;
+        }
+
+        need_suff--;
+
+        if (active_node == 0 && active_length > 0) {
+            active_length--;
+            active_rebr = pos - need_suff + 1;
+        } else if (active_node != 0) {
+            if (SuffTree[active_node].link == -1) {
+                active_node = 0;
+            } else {
+                active_node = SuffTree[active_node].link;
+            }
+        }
+    }
+}
+
+char GetSeparator(const std::string& s1, const std::string& s2, char forbidden) {
+    for (int x = 1; x < 256; x++) {
+        char c = static_cast<char>(x);
+
+        if (c == forbidden) {
+            continue;
+        }
+
+        if (s1.find(c) == std::string::npos && s2.find(c) == std::string::npos) {
+            return c;
+        }
+    }
+
+    return forbidden;
+}
+
+void buildsuffixtree(const std::string& s1, const std::string& s2) {
+    char separator1 = GetSeparator(s1, s2, 0);
+    char separator2 = GetSeparator(s1, s2, separator1);
+
+    global = s1 + separator1 + s2 + separator2;
+
+    pos1 = static_cast<int>(s1.size());
+    pos2 = static_cast<int>(s1.size() + 1 + s2.size());
+
+    SuffTree.clear();
+    node_depth.clear();
+
+    SuffTree.push_back(Node());
+
+    resetActive();
+
+    for (size_t i = 0; i < global.size(); i++) {
+        Ukkonen3(static_cast<int>(i));
+    }
+
+    current_pos = static_cast<int>(global.size()) - 1;
+
+    node_depth.resize(SuffTree.size(), 0);
+    CalculateDepths(0, 0);
+}
+
+int getstrid(int idx) {
+    if (!SuffTree[idx].is_leaf) return 0;
+
+    int start = SuffTree[idx].suffix_start;
+
+    if (start < pos1) {
+        return 1;
+    } else if (start > pos1 && start < pos2) {
+        return 2;
+    }
+
+    return 0;
+}
+
+int PropagateMasks(int node) {
+    int mask = 0;
+    int sample_start = -1;
+
+    if (SuffTree[node].is_leaf) {
+        int id = getstrid(node);
+
+        if (id == 1) {
+            mask = 1;
+        } else if (id == 2) {
+            mask = 2;
+        }
+
+        sample_start = SuffTree[node].suffix_start;
+    }
+
+    for (size_t i = 0; i < SuffTree[node].ChildNodes.size(); i++) {
+        int child = SuffTree[node].ChildNodes[i];
+
+        mask |= PropagateMasks(child);
+
+        if (sample_start == -1 && SuffTree[child].sample_start != -1) {
+            sample_start = SuffTree[child].sample_start;
+        }
+    }
+
+    SuffTree[node].mask = mask;
+    SuffTree[node].sample_start = sample_start;
+
+    return mask;
+}
+
+bool HasBoth(int node) {
+    return SuffTree[node].mask == 3;
+}
+
+void FindMaxLen(int node, int& maxlen) {
+    if (HasBoth(node) && node_depth[node] > maxlen) {
+        maxlen = node_depth[node];
+    }
+
+    for (size_t i = 0; i < SuffTree[node].ChildNodes.size(); i++) {
+        int child = SuffTree[node].ChildNodes[i];
+        FindMaxLen(child, maxlen);
+    }
+}
+
+void collect(int node, int& maxlen, std::vector<std::string>& results) {
+    if (HasBoth(node) && node_depth[node] == maxlen && maxlen > 0) {
+        int start = SuffTree[node].sample_start;
+        results.push_back(global.substr(start, maxlen));
+    }
+
+    for (size_t i = 0; i < SuffTree[node].ChildNodes.size(); i++) {
+        int child = SuffTree[node].ChildNodes[i];
+        collect(child, maxlen, results);
+    }
+}
+
+void find(const std::string& s1, const std::string& s2) {
+    buildsuffixtree(s1, s2);
+
+    PropagateMasks(0);
+
+    int maxlen = 0;
+    std::vector<std::string> results;
+
+    FindMaxLen(0, maxlen);
+    collect(0, maxlen, results);
+
+    std::sort(results.begin(), results.end());
+    results.erase(std::unique(results.begin(), results.end()), results.end());
+
+    std::cout << maxlen << '\n';
+
+    for (size_t i = 0; i < results.size(); i++) {
+        std::cout << results[i] << '\n';
+    }
+}
+
+int main() {
+    std::string s1, s2;
+
+    std::cin >> s1 >> s2;
+
+    find(s1, s2);
+
+    return 0;
+}
